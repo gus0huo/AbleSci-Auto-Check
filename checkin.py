@@ -9,7 +9,7 @@ import subprocess
 import requests
 
 from notify import notify
-from stats import load_history, save_history, add_record, write_report
+from stats import load_history, save_history, add_record, summary_text, write_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("checkin")
@@ -17,20 +17,7 @@ log = logging.getLogger("checkin")
 BASE = "https://www.ablesci.com"
 CHECKIN_URL = f"{BASE}/user/sign"
 LOGIN_URL = f"{BASE}/site/login"
-POINT_URL = f"{BASE}/my/point"          # 积分页
 ACCOUNTS_SECRET_NAME = "ABLESCI_ACCOUNTS"
-
-# 积分解析正则（第一条为精确定稿，命中即用）
-POINT_PATTERNS = [
-    r"您当前的总积分为[^0-9]{0,30}(\d+)",   # ✅ 精确匹配
-    r"总积分[^0-9]{0,30}(\d+)",
-    r"累计积分[^0-9]{0,30}(\d+)",
-    r"当前拥有[^0-9]{0,30}(\d+)",
-    r"积分余额[^0-9]{0,30}(\d+)",
-    r"可用积分[^0-9]{0,30}(\d+)",
-    r"我的积分[^0-9]{0,30}(\d+)",
-    r"积分[^0-9]{0,5}[:：][^0-9]{0,10}(\d+)",
-]
 
 
 class AbleSciClient:
@@ -43,13 +30,12 @@ class AbleSciClient:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0 Safari/537.36"
             ),
-            "Referer": f"{BASE}/",
+            "Referer": LOGIN_URL,
             "Origin": BASE,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
         })
 
-    # ---------- Cookie ----------
     def set_cookie(self, cookie_str: str):
         for item in cookie_str.split(";"):
             item = item.strip()
@@ -60,7 +46,6 @@ class AbleSciClient:
     def get_cookie_string(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.s.cookies.get_dict().items())
 
-    # ---------- 登录 ----------
     def login(self, email: str, password: str) -> bool:
         try:
             self.s.cookies.clear()
@@ -83,7 +68,6 @@ class AbleSciClient:
             log.error("❌ [%s] 登录异常: %s", self.email, e)
             return False
 
-    # ---------- 签到 ----------
     def checkin(self) -> dict:
         for attempt in range(3):
             try:
@@ -95,67 +79,24 @@ class AbleSciClient:
                 time.sleep(3 * (attempt + 1))
         raise RuntimeError("签到请求多次失败")
 
-    # ---------- ✅ 读取网站累计积分 ----------
-    def fetch_total_points(self):
-        """从 /my/point 页面解析累计积分，失败返回 None"""
-        try:
-            r = self.s.get(POINT_URL, timeout=20)
-            r.raise_for_status()
-            html = r.text
-
-            # 常规正则匹配
-            for pat in POINT_PATTERNS:
-                m = re.search(pat, html)
-                if m:
-                    points = int(m.group(1))
-                    log.info("[%s] 网站累计积分: %s", self.email, points)
-                    return points
-
-            # 兜底：JS 变量 / data 属性形式，如 var point = 1234
-            for pat in [
-                r"(?:point|score|jifen|total)[^0-9]{0,20}[:=]\s*['\"]?(\d+)",
-                r'data-(?:point|score)="(\d+)"',
-            ]:
-                m = re.search(pat, html, re.IGNORECASE)
-                if m:
-                    points = int(m.group(1))
-                    log.info("[%s] 网站累计积分(兜底匹配): %s", self.email, points)
-                    return points
-
-            # 调试输出：打印"积分"关键字周围片段
-            log.warning("[%s] 积分解析失败，调试输出开始 =====", self.email)
-            seen = 0
-            for m in re.finditer(r"积分", html):
-                start = max(0, m.start() - 120)
-                end = min(len(html), m.end() + 180)
-                log.warning("  [位置%s] ...%s...", m.start(), html[start:end])
-                seen += 1
-                if seen >= 8:
-                    break
-            log.warning("[%s] 调试输出结束 =====", self.email)
-            return None
-        except requests.RequestException as e:
-            log.warning("[%s] 读取积分页失败: %s", self.email, e)
-            return None
-
 
 # ================== 响应解析 ==================
 def parse_response(data: dict) -> dict:
+    """返回 {'status','desc','points','signcount'}"""
     code = data.get("code")
     if code == 0:
         msg = data.get("msg", "")
         sd = data.get("data", {})
         points = sd.get("signpoint", 0)
         signcount = sd.get("signcount", 0)
-        return {"status": "success",
-                "desc": f"✅ 签到成功 (连续{signcount}天 +{points}分)",
-                "points": points, "signcount": signcount}
+        desc = f"✅ 签到成功 (连续{signcount}天 +{points}分)"
+        return {"status": "success", "desc": desc, "points": points, "signcount": signcount}
 
     msg = data.get("msg", json.dumps(data, ensure_ascii=False))
     if "已" in msg and ("签到" in msg or "打卡" in msg):
         return {"status": "already", "desc": "ℹ️ 今日已签到", "points": 0, "signcount": 0}
     if "登录" in msg or code == -1:
-        return {"status": "auth_failed", "desc": "❌ 登录态失效", "points": 0, "signcount": 0}
+        return {"status": "auth_failed", "desc": f"❌ 登录态失效", "points": 0, "signcount": 0}
     return {"status": "failed", "desc": f"❌ 异常(code={code})", "points": 0, "signcount": 0}
 
 
@@ -174,28 +115,23 @@ def run_account(account: dict) -> dict:
         except Exception as e:
             result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
         if result["status"] != "auth_failed":
-            result["total"] = client.fetch_total_points()
             return result
         log.info("[%s] Cookie 过期，尝试密码登录...", email)
 
     # ② 密码登录
     if not (email and password):
-        return {"status": "failed", "desc": "❌ Cookie过期且无密码",
-                "points": 0, "signcount": 0, "total": None}
+        return {"status": "failed", "desc": "❌ Cookie过期且无密码", "points": 0, "signcount": 0}
     if not client.login(email, password):
-        return {"status": "failed", "desc": "❌ 密码登录失败",
-                "points": 0, "signcount": 0, "total": None}
+        return {"status": "failed", "desc": "❌ 密码登录失败", "points": 0, "signcount": 0}
 
     # ③ 更新 Cookie
     account["cookie"] = client.get_cookie_string()
 
-    # ④ 签到 + 读积分
+    # ④ 签到
     try:
-        result = parse_response(client.checkin())
+        return parse_response(client.checkin())
     except Exception as e:
-        result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
-    result["total"] = client.fetch_total_points()
-    return result
+        return {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
 
 
 # ================== Secret 回写 ==================
@@ -262,30 +198,29 @@ def main():
         try:
             result = run_account(account)
         except Exception as e:
-            result = {"status": "failed", "desc": f"❌ 未捕获异常: {e}",
-                      "points": 0, "signcount": 0, "total": None}
+            result = {"status": "failed", "desc": f"❌ 未捕获异常: {e}", "points": 0, "signcount": 0}
 
         if account.get("cookie", "") != old_cookie:
             cookie_changed = True
 
+        # 记录统计
         history = add_record(history, email or f"账号{i}", result["status"],
-                             result["points"], result["signcount"],
-                             result.get("total"))
+                             result["points"], result["signcount"])
         results.append((email or f"账号{i}", result))
-        time.sleep(2)
+        time.sleep(2)  # 账号间隔，降低风控
 
+    # 保存统计
     save_history(history)
     write_report(history)
 
+    # Cookie 有更新则回写
     if cookie_changed:
         save_accounts_to_secret(accounts)
 
-    # ---- 推送：累计积分来自网站 ----
-    lines = []
-    for name, r in results:
-        total = r.get("total")
-        total_txt = f" | 累计积分: {total}" if total is not None else ""
-        lines.append(f"{name}: {r['desc']}{total_txt}")
+    # 构建推送消息
+    lines = [f"{name}: {r['desc']}" for name, r in results]
+    lines.append("")
+    lines.append(summary_text(history))
 
     ok = sum(1 for _, r in results if r["status"] in ("success", "already"))
     today_points = sum(r["points"] for _, r in results)
@@ -294,6 +229,7 @@ def main():
         title += " ⚠️"
 
     notify(title, "\n".join(lines))
+
     if ok < len(accounts):
         sys.exit(1)
 
