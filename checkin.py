@@ -9,6 +9,7 @@ import subprocess
 import requests
 
 from notify import notify
+from stats import load_history, save_history, add_record, summary_text, write_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("checkin")
@@ -16,11 +17,12 @@ log = logging.getLogger("checkin")
 BASE = "https://www.ablesci.com"
 CHECKIN_URL = f"{BASE}/user/sign"
 LOGIN_URL = f"{BASE}/site/login"
-COOKIE_SECRET_NAME = "ABLESCI_COOKIE"
+ACCOUNTS_SECRET_NAME = "ABLESCI_ACCOUNTS"
 
 
 class AbleSciClient:
-    def __init__(self):
+    def __init__(self, email=""):
+        self.email = email
         self.s = requests.Session()
         self.s.headers.update({
             "User-Agent": (
@@ -34,9 +36,7 @@ class AbleSciClient:
             "Accept": "application/json, text/javascript, */*; q=0.01",
         })
 
-    # ---------- Cookie ----------
     def set_cookie(self, cookie_str: str):
-        """把 Cookie 字符串解析进 Session"""
         for item in cookie_str.split(";"):
             item = item.strip()
             if "=" in item:
@@ -46,12 +46,10 @@ class AbleSciClient:
     def get_cookie_string(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.s.cookies.get_dict().items())
 
-    # ---------- 登录 ----------
     def login(self, email: str, password: str) -> bool:
         try:
-            self.s.cookies.clear()          # 清掉旧 Cookie，避免干扰
+            self.s.cookies.clear()
             r = self.s.get(LOGIN_URL, timeout=20)
-
             m = re.search(r'name="_csrf"\s+value="([^"]+)"', r.text) or \
                 re.search(r'value="([^"]+)"\s+name="_csrf"', r.text)
             csrf = m.group(1) if m else ""
@@ -59,19 +57,17 @@ class AbleSciClient:
             payload = {"email": email, "password": password, "remember": "1"}
             if csrf:
                 payload["_csrf"] = csrf
-
             self.s.post(LOGIN_URL, data=payload, timeout=20)
 
             if "_identity-frontend" in self.s.cookies.get_dict():
-                log.info("✅ 账号登录成功，已获取新的 30 天凭据")
+                log.info("✅ [%s] 登录成功", self.email)
                 return True
-            log.error("❌ 登录失败：未获取到 _identity-frontend")
+            log.error("❌ [%s] 登录失败：未获取到 _identity-frontend", self.email)
             return False
         except requests.RequestException as e:
-            log.error("❌ 登录请求异常: %s", e)
+            log.error("❌ [%s] 登录异常: %s", self.email, e)
             return False
 
-    # ---------- 签到 ----------
     def checkin(self) -> dict:
         for attempt in range(3):
             try:
@@ -79,33 +75,81 @@ class AbleSciClient:
                 r.raise_for_status()
                 return r.json()
             except requests.RequestException as e:
-                log.warning("请求失败(%s/3): %s", attempt + 1, e)
+                log.warning("[%s] 请求失败(%s/3): %s", self.email, attempt + 1, e)
                 time.sleep(3 * (attempt + 1))
         raise RuntimeError("签到请求多次失败")
 
 
-# ================== 保存 Cookie 到 GitHub Secret ==================
-def save_cookie_to_secret(cookie_str: str) -> bool:
-    """登录成功后把新 Cookie 写回 Secret，实现 30 天自动续期"""
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        log.info("本地运行，跳过自动保存（请手动更新 Cookie）")
-        return False
-    if not shutil.which("gh"):
-        log.warning("未找到 gh 命令，无法保存 Cookie")
-        return False
-    if not os.environ.get("GH_TOKEN"):
-        log.warning("未配置 GH_TOKEN（PAT），无法保存 Cookie")
-        return False
+# ================== 响应解析 ==================
+def parse_response(data: dict) -> dict:
+    """返回 {'status','desc','points','signcount'}"""
+    code = data.get("code")
+    if code == 0:
+        msg = data.get("msg", "")
+        sd = data.get("data", {})
+        points = sd.get("signpoint", 0)
+        signcount = sd.get("signcount", 0)
+        desc = f"✅ 签到成功 (连续{signcount}天 +{points}分)"
+        return {"status": "success", "desc": desc, "points": points, "signcount": signcount}
 
+    msg = data.get("msg", json.dumps(data, ensure_ascii=False))
+    if "已" in msg and ("签到" in msg or "打卡" in msg):
+        return {"status": "already", "desc": "ℹ️ 今日已签到", "points": 0, "signcount": 0}
+    if "登录" in msg or code == -1:
+        return {"status": "auth_failed", "desc": f"❌ 登录态失效", "points": 0, "signcount": 0}
+    return {"status": "failed", "desc": f"❌ 异常(code={code})", "points": 0, "signcount": 0}
+
+
+# ================== 单账号处理 ==================
+def run_account(account: dict) -> dict:
+    email = account.get("email", "")
+    password = account.get("password", "")
+    cookie = account.get("cookie", "").strip()
+    client = AbleSciClient(email)
+
+    # ① 优先 Cookie
+    if cookie:
+        client.set_cookie(cookie)
+        try:
+            result = parse_response(client.checkin())
+        except Exception as e:
+            result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
+        if result["status"] != "auth_failed":
+            return result
+        log.info("[%s] Cookie 过期，尝试密码登录...", email)
+
+    # ② 密码登录
+    if not (email and password):
+        return {"status": "failed", "desc": "❌ Cookie过期且无密码", "points": 0, "signcount": 0}
+    if not client.login(email, password):
+        return {"status": "failed", "desc": "❌ 密码登录失败", "points": 0, "signcount": 0}
+
+    # ③ 更新 Cookie
+    account["cookie"] = client.get_cookie_string()
+
+    # ④ 签到
     try:
-        # 通过 stdin 传值，兼容所有 gh 版本，且不暴露在命令行参数中
+        return parse_response(client.checkin())
+    except Exception as e:
+        return {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
+
+
+# ================== Secret 回写 ==================
+def save_accounts_to_secret(accounts: list) -> bool:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        log.info("本地运行，跳过自动保存")
+        return False
+    if not shutil.which("gh") or not os.environ.get("GH_TOKEN"):
+        log.warning("未配置 gh / GH_TOKEN，跳过自动保存")
+        return False
+    try:
         r = subprocess.run(
-            ["gh", "secret", "set", COOKIE_SECRET_NAME],
-            input=cookie_str,
+            ["gh", "secret", "set", ACCOUNTS_SECRET_NAME],
+            input=json.dumps(accounts, ensure_ascii=False),
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode == 0:
-            log.info("✅ 新 Cookie 已写回 Secret: %s", COOKIE_SECRET_NAME)
+            log.info("✅ 账号数据已写回 Secret")
             return True
         log.warning("写回 Secret 失败: %s", r.stderr.strip())
         return False
@@ -114,76 +158,79 @@ def save_cookie_to_secret(cookie_str: str) -> bool:
         return False
 
 
-# ================== 响应解析 ==================
-def parse_response(data: dict) -> tuple:
-    """返回 (状态, 推送标题, 推送内容)"""
-    code = data.get("code")
+# ================== 账号加载 ==================
+def load_accounts() -> list:
+    raw = os.environ.get("ABLESCI_ACCOUNTS", "").strip()
+    if raw:
+        try:
+            accounts = json.loads(raw)
+            if isinstance(accounts, list) and accounts:
+                return accounts
+        except json.JSONDecodeError as e:
+            log.error("ABLESCI_ACCOUNTS 解析失败: %s", e)
+        sys.exit(1)
 
-    if code == 0:
-        msg = data.get("msg", "")
-        sign_data = data.get("data", {})
-        content = (f"{msg}\n"
-                   f"连续签到: {sign_data.get('signcount', '?')} 次\n"
-                   f"本次积分: {sign_data.get('signpoint', '?')}")
-        html = sign_data.get("today_history", "")
-        m = re.search(r'color:\s*#ea4335[^>]*>([^<]+)<', html)
-        if m:
-            content += f"\n今日历史: {m.group(1).strip()}"
-        return "success", "AbleSci 签到成功 ✅", content
+    # 兼容旧单账号配置
+    email = os.environ.get("ABLESCI_EMAIL", "").strip()
+    password = os.environ.get("ABLESCI_PASSWORD", "").strip()
+    cookie = os.environ.get("ABLESCI_COOKIE", "").strip()
+    if email or cookie:
+        return [{"email": email, "password": password, "cookie": cookie}]
 
-    msg = data.get("msg", json.dumps(data, ensure_ascii=False))
-    if "已" in msg and ("签到" in msg or "打卡" in msg):
-        return "already", "AbleSci 今日已签到 ℹ️", msg
-    if "登录" in msg or code == -1:
-        return "auth_failed", "AbleSci 签到失败 ❌", f"登录态失效: {msg}"
-    return "failed", "AbleSci 签到失败 ❌", f"code={code}\n{msg}"
+    log.error("未配置任何账号凭据")
+    sys.exit(1)
 
 
 # ================== 主流程 ==================
 def main():
-    client = AbleSciClient()
-    cookie = os.environ.get("ABLESCI_COOKIE", "").strip()
-    email = os.environ.get("ABLESCI_EMAIL", "").strip()
-    password = os.environ.get("ABLESCI_PASSWORD", "").strip()
+    accounts = load_accounts()
+    log.info("===== 加载 %s 个账号 =====", len(accounts))
 
-    result = title = content = None
+    history = load_history()
+    cookie_changed = False
+    results = []
 
-    # ---- ① 优先使用已保存的 Cookie ----
-    if cookie:
-        log.info("① 使用已保存的 Cookie 尝试签到...")
-        client.set_cookie(cookie)
+    for i, account in enumerate(accounts, 1):
+        email = account.get("email", "")
+        log.info("--- 账号 %s/%s: %s ---", i, len(accounts), email or f"账号{i}")
+        old_cookie = account.get("cookie", "")
+
         try:
-            result, title, content = parse_response(client.checkin())
+            result = run_account(account)
         except Exception as e:
-            result, title, content = "failed", "AbleSci 签到失败 ❌", f"脚本异常: {e}"
+            result = {"status": "failed", "desc": f"❌ 未捕获异常: {e}", "points": 0, "signcount": 0}
 
-    # ---- ② Cookie 缺失或已过期 → 账号密码登录 ----
-    if result in (None, "auth_failed"):
-        if result == "auth_failed":
-            log.info("② Cookie 已过期，改用账号密码登录...")
-        else:
-            log.info("② 未配置 Cookie，使用账号密码登录...")
+        if account.get("cookie", "") != old_cookie:
+            cookie_changed = True
 
-        if not (email and password):
-            notify("AbleSci 签到失败 ❌", "Cookie 已过期且未配置账号密码，请更新 Secret")
-            sys.exit(1)
+        # 记录统计
+        history = add_record(history, email or f"账号{i}", result["status"],
+                             result["points"], result["signcount"])
+        results.append((email or f"账号{i}", result))
+        time.sleep(2)  # 账号间隔，降低风控
 
-        if not client.login(email, password):
-            notify("AbleSci 签到失败 ❌", "账号密码登录失败，请检查凭据或是否触发验证")
-            sys.exit(1)
+    # 保存统计
+    save_history(history)
+    write_report(history)
 
-        # ③ 登录成功 → 把新 Cookie 写回 Secret
-        save_cookie_to_secret(client.get_cookie_string())
+    # Cookie 有更新则回写
+    if cookie_changed:
+        save_accounts_to_secret(accounts)
 
-        # ④ 用新会话签到
-        try:
-            result, title, content = parse_response(client.checkin())
-        except Exception as e:
-            result, title, content = "failed", "AbleSci 签到失败 ❌", f"脚本异常: {e}"
+    # 构建推送消息
+    lines = [f"{name}: {r['desc']}" for name, r in results]
+    lines.append("")
+    lines.append(summary_text(history))
 
-    # ---- 推送结果 ----
-    notify(title, content)
-    if result in ("auth_failed", "failed"):
+    ok = sum(1 for _, r in results if r["status"] in ("success", "already"))
+    today_points = sum(r["points"] for _, r in results)
+    title = f"AbleSci 签到 {ok}/{len(accounts)} 成功 | 今日+{today_points}分"
+    if ok < len(accounts):
+        title += " ⚠️"
+
+    notify(title, "\n".join(lines))
+
+    if ok < len(accounts):
         sys.exit(1)
 
 
