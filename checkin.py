@@ -5,7 +5,6 @@ import time
 import json
 import shutil
 import logging
-import tempfile
 import subprocess
 import requests
 
@@ -95,15 +94,14 @@ def save_cookie_to_secret(cookie_str: str) -> bool:
         log.warning("未找到 gh 命令，无法保存 Cookie")
         return False
     if not os.environ.get("GH_TOKEN"):
-        log.warning("未配置 GH_TOKEN（PAT），无法保存 Cookie，本次改用密码登录的会话")
+        log.warning("未配置 GH_TOKEN（PAT），无法保存 Cookie")
         return False
 
-    fd, path = tempfile.mkstemp()
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(cookie_str)
+        # 通过 stdin 传值，兼容所有 gh 版本，且不暴露在命令行参数中
         r = subprocess.run(
-            ["gh", "secret", "set", COOKIE_SECRET_NAME, "--body-file", path],
+            ["gh", "secret", "set", COOKIE_SECRET_NAME],
+            input=cookie_str,
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode == 0:
@@ -111,13 +109,16 @@ def save_cookie_to_secret(cookie_str: str) -> bool:
             return True
         log.warning("写回 Secret 失败: %s", r.stderr.strip())
         return False
-    finally:
-        os.remove(path)                      # 用后即删，不留痕迹
+    except Exception as e:
+        log.warning("写回 Secret 异常: %s", e)
+        return False
 
 
 # ================== 响应解析 ==================
 def parse_response(data: dict) -> tuple:
+    """返回 (状态, 推送标题, 推送内容)"""
     code = data.get("code")
+
     if code == 0:
         msg = data.get("msg", "")
         sign_data = data.get("data", {})
