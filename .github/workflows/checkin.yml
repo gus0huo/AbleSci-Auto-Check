@@ -2,12 +2,15 @@ name: AbleSci Auto Check-in
 
 on:
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 1 * * *'    # UTC 01:00 = 北京时间 09:00
   workflow_dispatch:
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 允许提交统计数据
+
     steps:
       - uses: actions/checkout@v4
 
@@ -19,14 +22,22 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run check-in
+        id: checkin
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}          # ✅ 新增：用于回写 Cookie
-          ABLESCI_COOKIE: ${{ secrets.ABLESCI_COOKIE }}
-          ABLESCI_EMAIL: ${{ secrets.ABLESCI_EMAIL }}
-          ABLESCI_PASSWORD: ${{ secrets.ABLESCI_PASSWORD }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ABLESCI_ACCOUNTS: ${{ secrets.ABLESCI_ACCOUNTS }}
           PUSH_SERVERCHAN_KEY: ${{ secrets.PUSH_SERVERCHAN_KEY }}
           PUSH_TELEGRAM_BOT_TOKEN: ${{ secrets.PUSH_TELEGRAM_BOT_TOKEN }}
           PUSH_TELEGRAM_CHAT_ID: ${{ secrets.PUSH_TELEGRAM_CHAT_ID }}
           PUSH_FEISHU_WEBHOOK: ${{ secrets.PUSH_FEISHU_WEBHOOK }}
           PUSH_DINGTALK_WEBHOOK: ${{ secrets.PUSH_DINGTALK_WEBHOOK }}
         run: python checkin.py
+
+      - name: Commit stats data
+        if: always()          # 即使签到部分失败也保存统计
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ STATS.md 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "📊 update check-in stats [skip ci]"
+          git push || true
