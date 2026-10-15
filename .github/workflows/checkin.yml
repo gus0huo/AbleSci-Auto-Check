@@ -2,7 +2,7 @@ name: AbleSci Auto Check-in
 
 on:
   schedule:
-    - cron: '0 1 * * *'    # UTC 01:00 = 北京时间 09:00
+    - cron: '0 22 * * *'    # UTC 01:00 = 北京时间 09:00
   workflow_dispatch:
 
 jobs:
