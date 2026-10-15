@@ -17,11 +17,12 @@ log = logging.getLogger("checkin")
 BASE = "https://www.ablesci.com"
 CHECKIN_URL = f"{BASE}/user/sign"
 LOGIN_URL = f"{BASE}/site/login"
-POINT_URL = f"{BASE}/my/point"          # ✅ 积分页
+POINT_URL = f"{BASE}/my/point"          # 积分页
 ACCOUNTS_SECRET_NAME = "ABLESCI_ACCOUNTS"
 
-# 积分解析候选正则（按页面实际写法匹配，命中即用）
+# 积分解析正则（第一条为精确定稿，命中即用）
 POINT_PATTERNS = [
+    r"您当前的总积分为[^0-9]{0,30}(\d+)",   # ✅ 精确匹配
     r"总积分[^0-9]{0,30}(\d+)",
     r"累计积分[^0-9]{0,30}(\d+)",
     r"当前拥有[^0-9]{0,30}(\d+)",
@@ -102,6 +103,7 @@ class AbleSciClient:
             r.raise_for_status()
             html = r.text
 
+            # 常规正则匹配
             for pat in POINT_PATTERNS:
                 m = re.search(pat, html)
                 if m:
@@ -109,9 +111,28 @@ class AbleSciClient:
                     log.info("[%s] 网站累计积分: %s", self.email, points)
                     return points
 
-            # 解析失败 → 打印页面片段便于调正则
-            snippet = re.sub(r"\s+", " ", html)
-            log.warning("[%s] 积分解析失败，页面片段: %s", self.email, snippet[:800])
+            # 兜底：JS 变量 / data 属性形式，如 var point = 1234
+            for pat in [
+                r"(?:point|score|jifen|total)[^0-9]{0,20}[:=]\s*['\"]?(\d+)",
+                r'data-(?:point|score)="(\d+)"',
+            ]:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    points = int(m.group(1))
+                    log.info("[%s] 网站累计积分(兜底匹配): %s", self.email, points)
+                    return points
+
+            # 调试输出：打印"积分"关键字周围片段
+            log.warning("[%s] 积分解析失败，调试输出开始 =====", self.email)
+            seen = 0
+            for m in re.finditer(r"积分", html):
+                start = max(0, m.start() - 120)
+                end = min(len(html), m.end() + 180)
+                log.warning("  [位置%s] ...%s...", m.start(), html[start:end])
+                seen += 1
+                if seen >= 8:
+                    break
+            log.warning("[%s] 调试输出结束 =====", self.email)
             return None
         except requests.RequestException as e:
             log.warning("[%s] 读取积分页失败: %s", self.email, e)
@@ -153,15 +174,17 @@ def run_account(account: dict) -> dict:
         except Exception as e:
             result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
         if result["status"] != "auth_failed":
-            result["total"] = client.fetch_total_points()      # ✅ 读网站积分
+            result["total"] = client.fetch_total_points()
             return result
         log.info("[%s] Cookie 过期，尝试密码登录...", email)
 
     # ② 密码登录
     if not (email and password):
-        return {"status": "failed", "desc": "❌ Cookie过期且无密码", "points": 0, "signcount": 0}
+        return {"status": "failed", "desc": "❌ Cookie过期且无密码",
+                "points": 0, "signcount": 0, "total": None}
     if not client.login(email, password):
-        return {"status": "failed", "desc": "❌ 密码登录失败", "points": 0, "signcount": 0}
+        return {"status": "failed", "desc": "❌ 密码登录失败",
+                "points": 0, "signcount": 0, "total": None}
 
     # ③ 更新 Cookie
     account["cookie"] = client.get_cookie_string()
@@ -171,7 +194,7 @@ def run_account(account: dict) -> dict:
         result = parse_response(client.checkin())
     except Exception as e:
         result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
-    result["total"] = client.fetch_total_points()               # ✅ 读网站积分
+    result["total"] = client.fetch_total_points()
     return result
 
 
@@ -211,6 +234,7 @@ def load_accounts() -> list:
             log.error("ABLESCI_ACCOUNTS 解析失败: %s", e)
         sys.exit(1)
 
+    # 兼容旧单账号配置
     email = os.environ.get("ABLESCI_EMAIL", "").strip()
     password = os.environ.get("ABLESCI_PASSWORD", "").strip()
     cookie = os.environ.get("ABLESCI_COOKIE", "").strip()
@@ -256,7 +280,7 @@ def main():
     if cookie_changed:
         save_accounts_to_secret(accounts)
 
-    # ---- ✅ 推送：积分直接来自网站 ----
+    # ---- 推送：累计积分来自网站 ----
     lines = []
     for name, r in results:
         total = r.get("total")
