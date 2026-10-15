@@ -1,0 +1,32 @@
+name: AbleSci Auto Check-in
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: pip install -r requirements.txt
+
+      - name: Run check-in
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}          # ✅ 新增：用于回写 Cookie
+          ABLESCI_COOKIE: ${{ secrets.ABLESCI_COOKIE }}
+          ABLESCI_EMAIL: ${{ secrets.ABLESCI_EMAIL }}
+          ABLESCI_PASSWORD: ${{ secrets.ABLESCI_PASSWORD }}
+          PUSH_SERVERCHAN_KEY: ${{ secrets.PUSH_SERVERCHAN_KEY }}
+          PUSH_TELEGRAM_BOT_TOKEN: ${{ secrets.PUSH_TELEGRAM_BOT_TOKEN }}
+          PUSH_TELEGRAM_CHAT_ID: ${{ secrets.PUSH_TELEGRAM_CHAT_ID }}
+          PUSH_FEISHU_WEBHOOK: ${{ secrets.PUSH_FEISHU_WEBHOOK }}
+          PUSH_DINGTALK_WEBHOOK: ${{ secrets.PUSH_DINGTALK_WEBHOOK }}
+        run: python checkin.py
