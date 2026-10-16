@@ -2,8 +2,10 @@ name: AbleSci Auto Check-in
 
 on:
   schedule:
-    - cron: '0 22 * * *'    # UTC 01:00 = 北京时间 09:00
-  workflow_dispatch:
+    # UTC 22:00 = 北京时间 06:00 启动，随后随机延迟 0~1 小时
+    # 实际执行落在北京时间 06:00 ~ 07:00 之间，每天时间随机
+    - cron: '0 22 * * *'
+  workflow_dispatch:    # 手动触发时不延迟，方便测试
 
 jobs:
   checkin:
@@ -12,6 +14,14 @@ jobs:
       contents: write       # 允许提交统计数据
 
     steps:
+      # ===== 随机延迟：仅定时任务执行，手动触发跳过 =====
+      - name: Random delay (6:00-7:00 北京时间之间执行)
+        if: github.event_name == 'schedule'
+        run: |
+          DELAY=$((RANDOM % 3600))     # 0 ~ 3599 秒，即 0~1 小时
+          echo "🎲 随机延迟 $((DELAY / 60)) 分 $((DELAY % 60)) 秒后开始签到"
+          sleep $DELAY
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
