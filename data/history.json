@@ -46,5 +46,21 @@
     "points": 10,
     "signcount": 4,
     "timestamp": "2026-10-17T01:12:36.830819"
+  },
+  {
+    "date": "2026-10-18",
+    "email": "210111048@sust.edu.cn",
+    "status": "success",
+    "points": 10,
+    "signcount": 4,
+    "timestamp": "2026-10-18T00:08:17.492699"
+  },
+  {
+    "date": "2026-10-18",
+    "email": "3136017357@qq.com",
+    "status": "success",
+    "points": 10,
+    "signcount": 5,
+    "timestamp": "2026-10-18T00:08:20.304753"
   }
 ]
