@@ -1,7 +1,7 @@
 """
 签到积分统计模块
-- 记录每日每个账号的签到结果
-- 生成汇总摘要（用于推送）
+- 记录每日每个账号的签到结果（含网站积分快照）
+- 生成汇总摘要
 - 生成 STATS.md 报表（提交回仓库）
 """
 
@@ -41,10 +41,13 @@ def save_history(history: list):
     log.info("📊 历史数据已保存: %s 条记录", len(history))
 
 
-def add_record(history: list, email: str, status: str, points: int, signcount: int) -> list:
-    """添加一条记录（同一天同一账号去重），返回更新后的列表"""
+def add_record(history: list, email: str, status: str, points: int,
+               signcount: int, total: int = None, site_today: int = None) -> list:
+    """添加记录（同一天同一账号去重）
+    total      - 网站当前总积分快照
+    site_today - 网站积分明细中今日变动合计
+    """
     today = date.today().isoformat()
-    # 去重：同一天同一账号只保留最新一条
     history = [r for r in history if not (r["date"] == today and r["email"] == email)]
     history.append({
         "date": today,
@@ -52,6 +55,8 @@ def add_record(history: list, email: str, status: str, points: int, signcount: i
         "status": status,
         "points": points,
         "signcount": signcount,
+        "total": total,
+        "site_today": site_today,
         "timestamp": datetime.now().isoformat(),
     })
     return history
@@ -59,51 +64,40 @@ def add_record(history: list, email: str, status: str, points: int, signcount: i
 
 # ================== 统计计算 ==================
 def _account_stats(history: list) -> dict:
-    """按账号汇总"""
     accounts = {}
     for r in history:
         email = r.get("email", "?")
         if email not in accounts:
-            accounts[email] = {"points": 0, "days": 0, "max_streak": 0, "last_streak": 0}
+            accounts[email] = {"points": 0, "days": 0, "max_streak": 0,
+                               "last_streak": 0, "last_total": None}
         accounts[email]["points"] += r.get("points", 0)
         accounts[email]["days"] += 1
         streak = r.get("signcount", 0)
         accounts[email]["max_streak"] = max(accounts[email]["max_streak"], streak)
-        # 记录最新的连续天数
+        if r.get("total") is not None:
+            accounts[email]["last_total"] = r["total"]
         if r["date"] == max(x["date"] for x in history if x["email"] == email):
             accounts[email]["last_streak"] = streak
     return accounts
 
 
 def summary_text(history: list) -> str:
-    """生成推送用的简短摘要"""
     if not history:
         return "📊 暂无统计数据"
-
     total_points = sum(r.get("points", 0) for r in history)
-    total_records = len(history)
-    today = date.today().isoformat()
-    today_points = sum(r.get("points", 0) for r in history if r["date"] == today)
-
-    lines = [f"📊 累计 {total_points} 分 | 今日 +{today_points} 分 | 共 {total_records} 天次"]
-
-    accounts = _account_stats(history)
-    for email, s in accounts.items():
-        lines.append(
-            f"  {email}: {s['points']}分 | {s['days']}天 | "
-            f"连续{s['last_streak']}天(最长{s['max_streak']})"
-        )
+    lines = [f"📊 累计获得 {total_points} 分 | 共 {len(history)} 天次"]
+    for email, s in _account_stats(history).items():
+        total = s["last_total"] if s["last_total"] is not None else "-"
+        lines.append(f"  {email}: 网站总积分 {total} | 签到{s['days']}天 | 连续{s['last_streak']}天")
     return "\n".join(lines)
 
 
 # ================== 报表生成 ==================
 def write_report(history: list):
-    """生成 STATS.md 统计报表"""
     if not history:
         return
 
     total_points = sum(r.get("points", 0) for r in history)
-    total_records = len(history)
     accounts = _account_stats(history)
 
     lines = [
@@ -113,18 +107,19 @@ def write_report(history: list):
         "",
         "## 总览",
         "",
-        f"- 累计积分: **{total_points}**",
-        f"- 总签到天次: **{total_records}**",
+        f"- 签到累计获得积分: **{total_points}**",
+        f"- 总签到天次: **{len(history)}**",
         f"- 账号数量: **{len(accounts)}**",
         "",
         "## 各账号统计",
         "",
-        "| 账号 | 累计积分 | 签到天数 | 当前连续 | 最长连续 |",
-        "|------|:-------:|:-------:|:-------:|:-------:|",
+        "| 账号 | 网站总积分 | 签到累计获得 | 签到天数 | 当前连续 | 最长连续 |",
+        "|------|:---------:|:----------:|:-------:|:-------:|:-------:|",
     ]
     for email, s in accounts.items():
+        total = s["last_total"] if s["last_total"] is not None else "-"
         lines.append(
-            f"| {email} | {s['points']} | {s['days']} | "
+            f"| {email} | {total} | {s['points']} | {s['days']} | "
             f"{s['last_streak']} 天 | {s['max_streak']} 天 |"
         )
 
@@ -132,15 +127,19 @@ def write_report(history: list):
         "",
         "## 最近 30 条记录",
         "",
-        "| 日期 | 账号 | 状态 | 积分 | 连续天数 |",
-        "|------|------|------|:----:|:-------:|",
+        "| 日期 | 账号 | 状态 | 签到积分 | 连续天数 | 今日变动 | 网站总积分 |",
+        "|------|------|------|:------:|:-------:|:------:|:--------:|",
     ]
     recent = sorted(history, key=lambda x: x.get("date", ""), reverse=True)[:30]
     for r in recent:
         status = STATUS_LABEL.get(r["status"], r["status"])
+        total = r.get("total")
+        site_today = r.get("site_today")
         lines.append(
             f"| {r['date']} | {r['email']} | {status} | "
-            f"+{r.get('points', 0)} | {r.get('signcount', 0)} |"
+            f"+{r.get('points', 0)} | {r.get('signcount', 0)} | "
+            f"{'+' if (site_today or 0) >= 0 else ''}{site_today if site_today is not None else '-'} | "
+            f"{total if total is not None else '-'} |"
         )
 
     with open("STATS.md", "w", encoding="utf-8") as f:
