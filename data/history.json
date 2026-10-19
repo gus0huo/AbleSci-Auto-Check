@@ -66,17 +66,21 @@
   {
     "date": "2026-10-19",
     "email": "210111048@sust.edu.cn",
-    "status": "success",
-    "points": 10,
-    "signcount": 5,
-    "timestamp": "2026-10-19T00:34:54.890141"
+    "status": "already",
+    "points": 0,
+    "signcount": 0,
+    "total": 70,
+    "site_today": 10,
+    "timestamp": "2026-10-19T02:56:50.966745"
   },
   {
     "date": "2026-10-19",
     "email": "3136017357@qq.com",
-    "status": "success",
-    "points": 10,
-    "signcount": 6,
-    "timestamp": "2026-10-19T00:34:57.531632"
+    "status": "already",
+    "points": 0,
+    "signcount": 0,
+    "total": 80,
+    "site_today": 10,
+    "timestamp": "2026-10-19T02:56:53.946084"
   }
 ]
