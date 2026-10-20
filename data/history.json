@@ -82,5 +82,25 @@
     "total": 80,
     "site_today": 10,
     "timestamp": "2026-10-19T02:56:53.946084"
+  },
+  {
+    "date": "2026-10-20",
+    "email": "210111048@sust.edu.cn",
+    "status": "success",
+    "points": 10,
+    "signcount": 6,
+    "total": 80,
+    "site_today": 10,
+    "timestamp": "2026-10-20T01:07:15.841490"
+  },
+  {
+    "date": "2026-10-20",
+    "email": "3136017357@qq.com",
+    "status": "success",
+    "points": 10,
+    "signcount": 7,
+    "total": 90,
+    "site_today": 10,
+    "timestamp": "2026-10-20T01:07:18.723072"
   }
 ]
