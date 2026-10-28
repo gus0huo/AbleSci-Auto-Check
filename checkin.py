@@ -10,7 +10,8 @@ from datetime import date
 import requests
 
 from notify import notify
-from stats import load_history, save_history, add_record, write_report
+from stats import (load_history, save_history, add_record,
+                   write_report, mask_email)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("checkin")
@@ -30,7 +31,7 @@ ROW_RE = re.compile(
 
 # 总积分候选正则（首选为精确定稿）
 POINT_PATTERNS = [
-    r'您当前的总积分为[\s\S]{0,200}?(\d[\d,]*)',   # ✅ 依据真实页面结构
+    r'您当前的总积分为[\s\S]{0,200}?(\d[\d,]*)',
     r"总积分[^0-9]{0,200}(\d[\d,]*)",
     r"累计积分[^0-9]{0,200}(\d[\d,]*)",
     r"当前拥有[^0-9]{0,200}(\d[\d,]*)",
@@ -42,7 +43,7 @@ def parse_point_rows(html: str) -> list:
     rows = []
     for m in ROW_RE.finditer(html):
         t, delta, desc_html = m.groups()
-        desc = re.sub(r'<[^>]+>', '', desc_html)      # 去掉 <a> 等标签
+        desc = re.sub(r'<[^>]+>', '', desc_html)
         desc = re.sub(r'\s+', ' ', desc).strip()
         rows.append({"time": t, "delta": int(delta), "desc": desc})
     return rows
@@ -90,12 +91,12 @@ class AbleSciClient:
             self.s.post(LOGIN_URL, data=payload, timeout=20)
 
             if "_identity-frontend" in self.s.cookies.get_dict():
-                log.info("✅ [%s] 登录成功", self.email)
+                log.info("✅ 登录成功")
                 return True
-            log.error("❌ [%s] 登录失败：未获取到 _identity-frontend", self.email)
+            log.error("❌ 登录失败：未获取到 _identity-frontend")
             return False
         except requests.RequestException as e:
-            log.error("❌ [%s] 登录异常: %s", self.email, e)
+            log.error("❌ 登录异常: %s", e)
             return False
 
     # ---------- 签到 ----------
@@ -106,19 +107,12 @@ class AbleSciClient:
                 r.raise_for_status()
                 return r.json()
             except requests.RequestException as e:
-                log.warning("[%s] 请求失败(%s/3): %s", self.email, attempt + 1, e)
+                log.warning("请求失败(%s/3): %s", attempt + 1, e)
                 time.sleep(3 * (attempt + 1))
         raise RuntimeError("签到请求多次失败")
 
-    # ---------- ✅ 读取积分页（总积分 + 今日变动） ----------
+    # ---------- 读取积分页（总积分 + 今日变动） ----------
     def fetch_point_info(self) -> dict:
-        """
-        返回:
-          total       - 当前总积分（页面"您当前的总积分为"）
-          today_points- 今日积分变动合计（积分明细表）
-          today_desc  - 今日积分说明，如"签到"
-        解析失败的字段为 None / 空
-        """
         info = {"total": None, "today_points": None, "today_desc": ""}
         try:
             r = self.s.get(POINT_URL, timeout=20)
@@ -140,17 +134,13 @@ class AbleSciClient:
                 info["today_points"] = sum(x["delta"] for x in today_rows)
                 info["today_desc"] = "、".join(x["desc"] for x in today_rows)
 
-            log.info("[%s] 网站积分: 累计=%s | 今日=%s(%s)",
-                     self.email, info["total"],
+            log.info("网站积分: 累计=%s | 今日=%s(%s)",
+                     info["total"],
                      f"{info['today_points']:+d}" if info["today_points"] is not None else "?",
                      info["today_desc"] or "-")
-
-            if info["total"] is None:
-                snippet = re.sub(r"\s+", " ", html)
-                log.warning("[%s] 总积分解析失败，页面片段: %s", self.email, snippet[:500])
             return info
         except requests.RequestException as e:
-            log.warning("[%s] 读取积分页失败: %s", self.email, e)
+            log.warning("读取积分页失败: %s", e)
             return info
 
 
@@ -178,16 +168,16 @@ def _attach_point_info(client: AbleSciClient, result: dict) -> dict:
     info = client.fetch_point_info()
     result["total"] = info["total"]
     result["site_today"] = info["today_points"]
-    result["site_desc"] = info["today_desc"]
     return result
 
 
 # ================== 单账号处理 ==================
 def run_account(account: dict) -> dict:
+    """注意：account['email'] 在此函数内是真实邮箱（登录必须）"""
     email = account.get("email", "")
     password = account.get("password", "")
     cookie = account.get("cookie", "").strip()
-    client = AbleSciClient(email)
+    client = AbleSciClient(mask_email(email))   # 日志显示脱敏邮箱
 
     # ① 优先 Cookie
     if cookie:
@@ -198,16 +188,16 @@ def run_account(account: dict) -> dict:
             result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
         if result["status"] != "auth_failed":
             return _attach_point_info(client, result)
-        log.info("[%s] Cookie 过期，尝试密码登录...", email)
+        log.info("Cookie 过期，尝试密码登录...")
 
     # ② 密码登录
     if not (email and password):
         result = {"status": "failed", "desc": "❌ Cookie过期且无密码", "points": 0, "signcount": 0}
-        result.update({"total": None, "site_today": None, "site_desc": ""})
+        result.update({"total": None, "site_today": None})
         return result
     if not client.login(email, password):
         result = {"status": "failed", "desc": "❌ 密码登录失败", "points": 0, "signcount": 0}
-        result.update({"total": None, "site_today": None, "site_desc": ""})
+        result.update({"total": None, "site_today": None})
         return result
 
     # ③ 更新 Cookie
@@ -257,6 +247,7 @@ def load_accounts() -> list:
             log.error("ABLESCI_ACCOUNTS 解析失败: %s", e)
         sys.exit(1)
 
+    # 兼容旧单账号配置
     email = os.environ.get("ABLESCI_EMAIL", "").strip()
     password = os.environ.get("ABLESCI_PASSWORD", "").strip()
     cookie = os.environ.get("ABLESCI_COOKIE", "").strip()
@@ -277,8 +268,8 @@ def main():
     results = []
 
     for i, account in enumerate(accounts, 1):
-        email = account.get("email", "")
-        log.info("--- 账号 %s/%s: %s ---", i, len(accounts), email or f"账号{i}")
+        display_name = mask_email(account.get("email", "")) if account.get("email") else f"账号{i}"
+        log.info("--- 账号 %s/%s: %s ---", i, len(accounts), display_name)
         old_cookie = account.get("cookie", "")
 
         try:
@@ -286,15 +277,16 @@ def main():
         except Exception as e:
             result = {"status": "failed", "desc": f"❌ 未捕获异常: {e}",
                       "points": 0, "signcount": 0,
-                      "total": None, "site_today": None, "site_desc": ""}
+                      "total": None, "site_today": None}
 
         if account.get("cookie", "") != old_cookie:
             cookie_changed = True
 
-        history = add_record(history, email or f"账号{i}", result["status"],
+        # ✅ 存储与展示均使用脱敏邮箱
+        history = add_record(history, display_name, result["status"],
                              result["points"], result["signcount"],
                              result.get("total"), result.get("site_today"))
-        results.append((email or f"账号{i}", result))
+        results.append((display_name, result))
         time.sleep(2)
 
     save_history(history)
@@ -303,7 +295,7 @@ def main():
     if cookie_changed:
         save_accounts_to_secret(accounts)
 
-    # ---- 推送：积分来自网站 ----
+    # ---- 推送（脱敏邮箱） ----
     lines = []
     for name, r in results:
         parts = [r["desc"]]
