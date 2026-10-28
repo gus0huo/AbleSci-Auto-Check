@@ -2,23 +2,21 @@ name: AbleSci Auto Check-in
 
 on:
   schedule:
-    # UTC 22:00 = 北京时间 06:00 启动，随后随机延迟 0~1 小时
-    # 实际执行落在北京时间 06:00 ~ 07:00 之间，每天时间随机
+    # UTC 22:00 = 北京时间 06:00 启动，随机延迟 0~1 小时
     - cron: '0 22 * * *'
-  workflow_dispatch:    # 手动触发时不延迟，方便测试
+  workflow_dispatch:
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write       # 允许提交统计数据
+    timeout-minutes: 180
 
     steps:
       # ===== 随机延迟：仅定时任务执行，手动触发跳过 =====
       - name: Random delay (6:00-7:00 北京时间之间执行)
         if: github.event_name == 'schedule'
         run: |
-          DELAY=$((RANDOM % 3600))     # 0 ~ 3599 秒，即 0~1 小时
+          DELAY=$((RANDOM % 7200))
           echo "🎲 随机延迟 $((DELAY / 60)) 分 $((DELAY % 60)) 秒后开始签到"
           sleep $DELAY
 
@@ -32,7 +30,6 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run check-in
-        id: checkin
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           ABLESCI_ACCOUNTS: ${{ secrets.ABLESCI_ACCOUNTS }}
@@ -42,12 +39,3 @@ jobs:
           PUSH_FEISHU_WEBHOOK: ${{ secrets.PUSH_FEISHU_WEBHOOK }}
           PUSH_DINGTALK_WEBHOOK: ${{ secrets.PUSH_DINGTALK_WEBHOOK }}
         run: python checkin.py
-
-      - name: Commit stats data
-        if: always()          # 即使签到部分失败也保存统计
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/ STATS.md 2>/dev/null || true
-          git diff --staged --quiet || git commit -m "📊 update check-in stats [skip ci]"
-          git push || true
