@@ -20,7 +20,7 @@ def _post(url: str, **kwargs) -> bool:
         r.raise_for_status()
         return True
     except requests.RequestException as e:
-        log.warning("推送失败: %s | %s", url.split("?")[0], e)
+        log.warning("推送失败: %s | %s", url.split("?")[0], type(e).__name__)
         return False
 
 
@@ -86,4 +86,4 @@ def notify(title: str, content: str) -> None:
     if sent:
         log.info("📨 通知已推送至: %s", "、".join(sent))
     else:
-        log.info("ℹ️  未配置任何通知渠道，跳过推送")
+        log.info("ℹ️  未配置任何通知渠道或推送失败")
