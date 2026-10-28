@@ -1,6 +1,6 @@
 """
 签到积分统计模块
-- 记录每日签到结果（邮箱脱敏存储）
+- 记录每日签到结果（邮箱完全打码存储）
 - 生成汇总摘要与 STATS.md 报表
 """
 
@@ -23,15 +23,10 @@ STATUS_LABEL = {
 
 
 def mask_email(email: str) -> str:
-    """邮箱脱敏示例：user@example.com → us***er@example.com"""
-    if not email or "@" not in email:
-        return email
-    local, domain = email.split("@", 1)
-    if len(local) <= 3:
-        masked = local[0] + "***"
-    else:
-        masked = local[:2] + "***" + local[-2:]
-    return f"{masked}@{domain}"
+    """邮箱完全打码：user@example.com → ***@***"""
+    if not email:
+        return "***"
+    return "***@***"
 
 
 # ================== 数据读写 ==================
@@ -55,7 +50,7 @@ def save_history(history: list):
 def add_record(history: list, email: str, status: str, points: int,
                signcount: int, total: int = None, site_today: int = None) -> list:
     """添加记录（同一天同一账号去重）
-    email      - 脱敏后的邮箱
+    email      - 已打码的邮箱标识
     total      - 网站当前总积分快照
     site_today - 网站积分明细中今日变动合计
     """
