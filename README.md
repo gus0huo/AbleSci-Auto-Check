@@ -38,4 +38,3 @@
   {"email": "your_email@example.com", "password": "your_password", "cookie": ""},
   {"email": "your_email2@example.com", "password": "your_password2", "cookie": ""}
 ]
-##cookie 留空即可，脚本会自动登录并填入
