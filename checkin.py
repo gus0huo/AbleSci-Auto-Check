@@ -29,13 +29,45 @@ ROW_RE = re.compile(
     r'<td>([\s\S]*?)</td>'
 )
 
-# 总积分候选正则（首选为精确定稿）
+# 总积分候选正则
 POINT_PATTERNS = [
     r'您当前的总积分为[\s\S]{0,200}?(\d[\d,]*)',
     r"总积分[^0-9]{0,200}(\d[\d,]*)",
     r"累计积分[^0-9]{0,200}(\d[\d,]*)",
     r"当前拥有[^0-9]{0,200}(\d[\d,]*)",
 ]
+
+
+# ================== 🔒 日志安全过滤器 ==================
+class SensitiveDataFilter(logging.Filter):
+    """自动将日志中的真实邮箱/密码/Cookie 替换为打码形式，防止开源后泄露"""
+    def __init__(self):
+        super().__init__()
+        self._secrets = []
+
+    def register(self, real_value: str):
+        if real_value and len(real_value) > 3:
+            self._secrets.append(real_value)
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+            changed = False
+            for secret in self._secrets:
+                if secret in msg:
+                    msg = msg.replace(secret, "***")
+                    changed = True
+            if changed:
+                record.msg = msg
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+sensitive_filter = SensitiveDataFilter()
+logging.getLogger().addFilter(sensitive_filter)
+log.addFilter(sensitive_filter)
 
 
 def parse_point_rows(html: str) -> list:
@@ -91,12 +123,12 @@ class AbleSciClient:
             self.s.post(LOGIN_URL, data=payload, timeout=20)
 
             if "_identity-frontend" in self.s.cookies.get_dict():
-                log.info("✅ 登录成功")
+                log.info("✅ [%s] 登录成功", self.email)
                 return True
-            log.error("❌ 登录失败：未获取到 _identity-frontend")
+            log.error("❌ [%s] 登录失败", self.email)
             return False
         except requests.RequestException as e:
-            log.error("❌ 登录异常: %s", e)
+            log.error("❌ [%s] 登录异常: %s", self.email, type(e).__name__)
             return False
 
     # ---------- 签到 ----------
@@ -107,11 +139,11 @@ class AbleSciClient:
                 r.raise_for_status()
                 return r.json()
             except requests.RequestException as e:
-                log.warning("请求失败(%s/3): %s", attempt + 1, e)
+                log.warning("[%s] 请求失败(%s/3): %s", self.email, attempt + 1, type(e).__name__)
                 time.sleep(3 * (attempt + 1))
         raise RuntimeError("签到请求多次失败")
 
-    # ---------- 读取积分页（总积分 + 今日变动） ----------
+    # ---------- 读取积分页 ----------
     def fetch_point_info(self) -> dict:
         info = {"total": None, "today_points": None, "today_desc": ""}
         try:
@@ -119,14 +151,14 @@ class AbleSciClient:
             r.raise_for_status()
             html = r.text
 
-            # 1) 总积分
+            # 总积分
             for pat in POINT_PATTERNS:
                 m = re.search(pat, html)
                 if m:
                     info["total"] = int(m.group(1).replace(",", ""))
                     break
 
-            # 2) 积分明细表 → 今日变动
+            # 积分明细表 → 今日变动
             rows = parse_point_rows(html)
             today = date.today().isoformat()
             today_rows = [x for x in rows if x["time"].startswith(today)]
@@ -134,13 +166,13 @@ class AbleSciClient:
                 info["today_points"] = sum(x["delta"] for x in today_rows)
                 info["today_desc"] = "、".join(x["desc"] for x in today_rows)
 
-            log.info("网站积分: 累计=%s | 今日=%s(%s)",
-                     info["total"],
+            log.info("[%s] 网站积分: 累计=%s | 今日=%s(%s)",
+                     self.email, info["total"],
                      f"{info['today_points']:+d}" if info["today_points"] is not None else "?",
                      info["today_desc"] or "-")
             return info
         except requests.RequestException as e:
-            log.warning("读取积分页失败: %s", e)
+            log.warning("[%s] 读取积分页失败: %s", self.email, type(e).__name__)
             return info
 
 
@@ -173,11 +205,12 @@ def _attach_point_info(client: AbleSciClient, result: dict) -> dict:
 
 # ================== 单账号处理 ==================
 def run_account(account: dict) -> dict:
-    """注意：account['email'] 在此函数内是真实邮箱（登录必须）"""
+    """account['email'] 在此函数内是真实邮箱（登录必须），展示时用脱敏"""
     email = account.get("email", "")
     password = account.get("password", "")
     cookie = account.get("cookie", "").strip()
-    client = AbleSciClient(mask_email(email))   # 日志显示脱敏邮箱
+    safe_name = mask_email(email)   # 显示用：***@***
+    client = AbleSciClient(safe_name)
 
     # ① 优先 Cookie
     if cookie:
@@ -185,10 +218,11 @@ def run_account(account: dict) -> dict:
         try:
             result = parse_response(client.checkin())
         except Exception as e:
-            result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
+            result = {"status": "failed", "desc": f"❌ 异常: {type(e).__name__}",
+                      "points": 0, "signcount": 0}
         if result["status"] != "auth_failed":
             return _attach_point_info(client, result)
-        log.info("Cookie 过期，尝试密码登录...")
+        log.info("[%s] Cookie 过期，尝试密码登录...", safe_name)
 
     # ② 密码登录
     if not (email and password):
@@ -207,7 +241,8 @@ def run_account(account: dict) -> dict:
     try:
         result = parse_response(client.checkin())
     except Exception as e:
-        result = {"status": "failed", "desc": f"❌ 异常: {e}", "points": 0, "signcount": 0}
+        result = {"status": "failed", "desc": f"❌ 异常: {type(e).__name__}",
+                  "points": 0, "signcount": 0}
     return _attach_point_info(client, result)
 
 
@@ -228,10 +263,10 @@ def save_accounts_to_secret(accounts: list) -> bool:
         if r.returncode == 0:
             log.info("✅ 账号数据已写回 Secret")
             return True
-        log.warning("写回 Secret 失败: %s", r.stderr.strip())
+        log.warning("写回 Secret 失败: %s", r.stderr.strip()[:100])
         return False
     except Exception as e:
-        log.warning("写回 Secret 异常: %s", e)
+        log.warning("写回 Secret 异常: %s", type(e).__name__)
         return False
 
 
@@ -244,10 +279,9 @@ def load_accounts() -> list:
             if isinstance(accounts, list) and accounts:
                 return accounts
         except json.JSONDecodeError as e:
-            log.error("ABLESCI_ACCOUNTS 解析失败: %s", e)
+            log.error("ABLESCI_ACCOUNTS 解析失败: %s", type(e).__name__)
         sys.exit(1)
 
-    # 兼容旧单账号配置
     email = os.environ.get("ABLESCI_EMAIL", "").strip()
     password = os.environ.get("ABLESCI_PASSWORD", "").strip()
     cookie = os.environ.get("ABLESCI_COOKIE", "").strip()
@@ -261,6 +295,15 @@ def load_accounts() -> list:
 # ================== 主流程 ==================
 def main():
     accounts = load_accounts()
+
+    # 🔒 注册所有敏感值到日志过滤器
+    for acc in accounts:
+        sensitive_filter.register(acc.get("email", ""))
+        sensitive_filter.register(acc.get("password", ""))
+        sensitive_filter.register(acc.get("cookie", ""))
+    for key in ("ABLESCI_EMAIL", "ABLESCI_PASSWORD", "ABLESCI_COOKIE"):
+        sensitive_filter.register(os.environ.get(key, ""))
+
     log.info("===== 加载 %s 个账号 =====", len(accounts))
 
     history = load_history()
@@ -268,21 +311,20 @@ def main():
     results = []
 
     for i, account in enumerate(accounts, 1):
-        display_name = mask_email(account.get("email", "")) if account.get("email") else f"账号{i}"
+        display_name = f"账号{i}"   # ✅ 完全打码，不显示任何邮箱信息
         log.info("--- 账号 %s/%s: %s ---", i, len(accounts), display_name)
         old_cookie = account.get("cookie", "")
 
         try:
             result = run_account(account)
         except Exception as e:
-            result = {"status": "failed", "desc": f"❌ 未捕获异常: {e}",
+            result = {"status": "failed", "desc": f"❌ 未捕获异常: {type(e).__name__}",
                       "points": 0, "signcount": 0,
                       "total": None, "site_today": None}
 
         if account.get("cookie", "") != old_cookie:
             cookie_changed = True
 
-        # ✅ 存储与展示均使用脱敏邮箱
         history = add_record(history, display_name, result["status"],
                              result["points"], result["signcount"],
                              result.get("total"), result.get("site_today"))
@@ -295,7 +337,7 @@ def main():
     if cookie_changed:
         save_accounts_to_secret(accounts)
 
-    # ---- 推送（脱敏邮箱） ----
+    # ---- 推送（完全打码） ----
     lines = []
     for name, r in results:
         parts = [r["desc"]]
