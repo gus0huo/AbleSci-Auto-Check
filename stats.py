@@ -1,8 +1,7 @@
 """
 签到积分统计模块
-- 记录每日每个账号的签到结果（含网站积分快照）
-- 生成汇总摘要
-- 生成 STATS.md 报表（提交回仓库）
+- 记录每日签到结果（邮箱脱敏存储）
+- 生成汇总摘要与 STATS.md 报表
 """
 
 import os
@@ -21,6 +20,18 @@ STATUS_LABEL = {
     "failed": "❌ 失败",
     "auth_failed": "❌ 登录失效",
 }
+
+
+def mask_email(email: str) -> str:
+    """邮箱脱敏示例：user@example.com → us***er@example.com"""
+    if not email or "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    if len(local) <= 3:
+        masked = local[0] + "***"
+    else:
+        masked = local[:2] + "***" + local[-2:]
+    return f"{masked}@{domain}"
 
 
 # ================== 数据读写 ==================
@@ -44,6 +55,7 @@ def save_history(history: list):
 def add_record(history: list, email: str, status: str, points: int,
                signcount: int, total: int = None, site_today: int = None) -> list:
     """添加记录（同一天同一账号去重）
+    email      - 脱敏后的邮箱
     total      - 网站当前总积分快照
     site_today - 网站积分明细中今日变动合计
     """
