@@ -1,0 +1,44 @@
+name: Generate Random Check-in Schedule
+
+on:
+  schedule:
+    # UTC 12:00 = 北京时间 20:00，每天生成明天的签到时间
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write       # 允许提交 cron 更新
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🎲 Generate random cron time
+        run: |
+          # ===== 随机时间窗口：北京时间 6:00 ~ 7:59 (UTC 22:00 ~ 23:59) =====
+          HOUR=$((22 + RANDOM % 2))       # UTC 22 或 23
+          MINUTE=$((RANDOM % 60))
+          CRON="$MINUTE $HOUR * * *"
+
+          # 换算北京时间用于日志和注释
+          BJ_HOUR=$((HOUR - 22 + 6))
+          BJ_TIME="${BJ_HOUR}:$(printf '%02d' $MINUTE)"
+
+          echo "🎲 明日签到时间：北京时间 ${BJ_TIME} (cron: $CRON)"
+
+          # 更新 checkin.yml 中标记为 AUTO-GENERATED 的 cron 行
+          sed -i "s/- cron: '[^']*'.*# AUTO-GENERATED.*/- cron: '${CRON}'    # AUTO-GENERATED 明日北京时间 ${BJ_TIME} 签到/" .github/workflows/checkin.yml
+
+          echo "--- 更新后的 cron 行 ---"
+          grep "AUTO-GENERATED" .github/workflows/checkin.yml
+
+      - name: Commit updated schedule
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/checkin.yml
+          git diff --staged --quiet || git commit -m "⏰ 明日签到时间已随机生成 [skip ci]"
+          git push
