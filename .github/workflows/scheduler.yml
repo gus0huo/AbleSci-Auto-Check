@@ -11,9 +11,9 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5          # ✅ v5
         with:
-          token: ${{ secrets.PAT_TOKEN }}    # ✅ 用 PAT 替代默认令牌
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: 🎲 Generate random cron time
         run: |
