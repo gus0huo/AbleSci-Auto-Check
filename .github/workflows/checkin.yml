@@ -2,7 +2,7 @@ name: AbleSci Auto Check-in
 
 on:
   schedule:
-    - cron: '3 22 * * *'    # AUTO-GENERATED 明日北京时间 6:03 签到
+    - cron: '22 23 * * *'    # AUTO-GENERATED 明日北京时间 7:22 签到
   workflow_dispatch:
 
 jobs:
